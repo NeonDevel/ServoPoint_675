@@ -16,9 +16,12 @@ The goal of the project is to improve the device by adding 2 configuration butto
 
 >success
 
+### Project Status
+> in progress
+
 ### Versioning
 
-version 1.0.1  (15.06.2017)  initial
+version 2.0.1  (16.06.2017) - new hardware version
 
 
 

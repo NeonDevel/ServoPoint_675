@@ -10,7 +10,7 @@
 ;; Date:            26.10.2007						;;
 ;; First release:   26.10.2007						;;
 ;; Last release by Paco  26.10.2007
-;; LastDate:        15.06.2017						;; 
+;; LastDate:        16.06.2017						;; 
 ;;									
 ;;======================================================================;;
 ;
@@ -27,12 +27,12 @@
 
 ; Revisions ServoPoint_675
 ; 15.06.2017  initial version - works on both processors PIC12F675 and PIC12F675
-
+; 16.06.2017  ver 2.0.1 - new hardware version, LED connected to RELE1A, UP/Down buttons on GP4/AN3
 
 ; ----- Definitions
 
 #define		__VERNUM	D'1'
-#define		__VERDAY	 0x15
+#define		__VERDAY	 0x16
 #define		__VERMONTH 0x06
 #define		__VERYEAR	 0x17
 
@@ -54,11 +54,11 @@
    ; WARNING:  Make sure that internal osc. is calibrated
 	 ;           Value has to be read before reprogramming the device.  
   
-#IFDEF __12F675
+#ifdef __12F675
   #include p12F675.inc
 #endif
 
-#IFDEF __12F629
+#ifdef __12F629
   #include p12F629.inc
 #endif
 
@@ -68,21 +68,40 @@
 
 FXTAL		equ	D'4000000'		; internal oscilator
 
+; when needed OSCCAL can be set during programming
+;#define OSCCAL_VALUE 0x34
+
+#ifdef __12F629
 GP_TRIS         equ     0x0C			; GP2,GP3: inputs
+WPU_INI		equ	0x33			; Weak pull-up enable. default, no pull-ups
+#endif
+
+#ifdef __12F675
+GP_TRIS     equ 0x1C			; GP2,GP3: inputs, GP4: analog input
+ANSEL_INI   equ 0x28      ; GP4/AN3 pin - as analog input  ADCS2:0= 010 -> 32/Tosc = 8us conversion time
+ADCON0_INI  equ 0x0C      ; AN3 connected to Sample&Hold , VDD - as voltage reference, result Left justified
+WPU_INI     equ 0x23			; Weak pull-up enable on outputs GP0,GP1,GP5. default, no pull-ups
+#endif
+
 GP_INI          equ     0x00			; all zero
 OPTION_INI	equ	0x88			; Option register: no pull-up, falling GP2, no prescaler, wdt 1:1
-WPU_INI		equ	0x33			; Weak pull-up enable. default, no pull-ups
-
 INTC_INI	equ	0xD0			; GIE, INTE enable, PEIE enable
 PIE1_INI	equ	0x01			; interrupt TMR1
 
 
-#define		RELE1A	GPIO,0			; Rele output straight
-#define		RELE1B	GPIO,1			; Rele output diverge
-#define		DCCIN	GPIO,2			; DCC input pin
+#define		RELE1A	GPIO,0			; Rele output straight - RED Led / Programming mode
+#define		RELE1B	GPIO,1			; Rele output diverge -  GREEN Led
+#define		DCCIN	  GPIO,2			; DCC input pin
 #define		SWITCH	GPIO,3			; Move/Programm switch (GPIO,3 only input)
-#define		LED	GPIO,4			; Prog LED 
-#define		SERVO	GPIO,5			; Servo output
+#ifdef __12F629
+#define		LED	    GPIO,4			;Prog LED 
+#endif
+
+#ifdef __12F675
+#define		LED	    GPIO,0			; Prog LED on RELE1A output
+#define   KBD     GPIO,4      ; AN3
+#endif
+#define		SERVO	  GPIO,5			; Servo output
 
 
 REACH_PULS	equ	0x04			; aditional pulses when reached position
@@ -334,13 +353,22 @@ INIT:
 		clrf	GPIO
 		movlw	0x07
 		movwf	CMCON			; set GP2:0 to digital I/O
+#ifdef __12F675     
+    movlw ADCON0_INI
+    movwf ADCON0
+#endif
 		bsf	STATUS,RP0		; bank 1
-#IFDEF __12F675 
-    clrf ANSEL   ; for PIC12F675 pins need to be configured as digital inputs
+#ifdef __12F675 
+    movlw ADCON0_INI
+    movwf ANSEL     ; PIC12F675  Analog Select Register
 #endif   
 		movlw	GP_TRIS
 		movwf	TRISIO
-		call	0x3FF			; get OSCCAL value
+#ifndef OSCCAL_VALUE    
+		call	0x3FF			; get factory calibrated OSCCAL from last address of Flash
+#else
+    movlw OSCCAL_VALUE   ; set OSCCAL manualy 
+#endif
 		movwf	OSCCAL
 		movlw	WPU_INI			; pull-ups
 		movwf	WPU
