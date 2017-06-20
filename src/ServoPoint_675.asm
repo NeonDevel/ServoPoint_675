@@ -10,7 +10,7 @@
 ;; Date:            26.10.2007						;;
 ;; First release:   26.10.2007						;;
 ;; Last release by Paco  26.10.2007
-;; LastDate:        16.06.2017						;; 
+;; LastDate:        20.06.2017						;; 
 ;;									
 ;;======================================================================;;
 ;
@@ -28,16 +28,13 @@
 ; Revisions ServoPoint_675
 ; 15.06.2017  initial version - works on both processors PIC12F675 and PIC12F675
 ; 16.06.2017  ver 2.0.1 - new hardware version, LED connected to RELE1A, UP/Down buttons on GP4/AN3
-
+; 20.06.2017  ver 2.0.2 - added new variables, and ADC interrupt handler. Bug since v 2.0.1 - DCC doesn't work
 ; ----- Definitions
 
 #define		__VERNUM	D'1'
-#define		__VERDAY	 0x16
+#define		__VERDAY	 0x20
 #define		__VERMONTH 0x06
 #define		__VERYEAR	 0x17
-
-
-
 
 
 ;This project can be compiled either for PIC12F629 or PIC12F675 processors
@@ -52,14 +49,14 @@
 	errorlevel -305,-302
 
    ; WARNING:  Make sure that internal osc. is calibrated
-	 ;           Value has to be read before reprogramming the device.  
+  ;           Value has to be read before reprogramming the device.  
   
 #ifdef __12F675
-  #include p12F675.inc
+	#include p12F675.inc
 #endif
 
 #ifdef __12F629
-  #include p12F629.inc
+	#include p12F629.inc
 #endif
 
 	__CONFIG  _BODEN_ON & _CP_OFF & _WDT_OFF & _MCLRE_OFF & _PWRTE_OFF & _INTRC_OSC_NOCLKOUT 
@@ -71,40 +68,45 @@ FXTAL		equ	D'4000000'		; internal oscilator
 ; when needed OSCCAL can be set during programming
 ;#define OSCCAL_VALUE 0x34
 
-#ifdef __12F629
-GP_TRIS         equ     0x0C			; GP2,GP3: inputs
-WPU_INI		equ	0x33			; Weak pull-up enable. default, no pull-ups
-#endif
 
 #ifdef __12F675
-GP_TRIS     equ 0x1C			; GP2,GP3: inputs, GP4: analog input
-ANSEL_INI   equ 0x28      ; GP4/AN3 pin - as analog input  ADCS2:0= 010 -> 32/Tosc = 8us conversion time
-ADCON0_INI  equ 0x0C      ; AN3 connected to Sample&Hold , VDD - as voltage reference, result Left justified
-WPU_INI     equ 0x23			; Weak pull-up enable on outputs GP0,GP1,GP5. default, no pull-ups
+GP_TRIS			equ 0x1C			; GP2,GP3: inputs, GP4: analog input
+ANSEL_INI		equ 0x28      ; GP4/AN3 pin - as analog input  ADCS2:0= 010 -> 32/Tosc = 8us conversion time
+ADCON0_INI	equ 0x0C      ; AN3 connected to Sample&Hold , VDD - as voltage reference, result Left justified
+WPU_INI			equ 0x23			; Weak pull-up enable on outputs GP0,GP1,GP5. default, no pull-ups
+PIE1_INI   	equ	0x41			; interrupt TMR1, ADIE 
+#else 
+GP_TRIS			equ	0x0C			; GP2,GP3: inputs
+WPU_INI			equ	0x33			; Weak pull-up enable. default, no pull-ups
+PIE1_INI		equ	0x01			; interrupt TMR1
 #endif
-
-GP_INI          equ     0x00			; all zero
 OPTION_INI	equ	0x88			; Option register: no pull-up, falling GP2, no prescaler, wdt 1:1
-INTC_INI	equ	0xD0			; GIE, INTE enable, PEIE enable
-PIE1_INI	equ	0x01			; interrupt TMR1
+INTC_INI		equ	0xD0			; GIE, INTE enable, PEIE enable
 
+POSITION_SAVE_DELAY equ 0x64   ; time delay x 20ms to  save current position in eeprom
 
 #define		RELE1A	GPIO,0			; Rele output straight - RED Led / Programming mode
 #define		RELE1B	GPIO,1			; Rele output diverge -  GREEN Led
 #define		DCCIN	  GPIO,2			; DCC input pin
 #define		SWITCH	GPIO,3			; Move/Programm switch (GPIO,3 only input)
-#ifdef __12F629
+#ifdef __12F675
+#define		LED	GPIO,0			; Prog LED on RELE1A output
+#define	KBD	GPIO,4      ; AN3
+#else 
 #define		LED	    GPIO,4			;Prog LED 
 #endif
-
-#ifdef __12F675
-#define		LED	    GPIO,0			; Prog LED on RELE1A output
-#define   KBD     GPIO,4      ; AN3
-#endif
-#define		SERVO	  GPIO,5			; Servo output
+#define	SERVO	GPIO,5			; Servo output
 
 
 REACH_PULS	equ	0x04			; aditional pulses when reached position
+
+; threshold voltage levels corresponding to the button held down
+THR_K1	equ	d'190'   
+THR_K2	equ	d'150'
+THR_K12	equ	d'115'
+THR_KERR	equ d'90'
+DEBOUNCE_COUNT	equ	4
+
 
 
 ; --- EEPROM Section
@@ -147,15 +149,17 @@ SRVADRL1	equ	RAMINI0+0x11		;
 RANGE1		equ	RAMINI0+0x12		; servo range
 SPEED1		equ	RAMINI0+0x13		; servo speed
 
+STATE			equ	RAMINI0+0x1F		; state of decoder (position,moving,programming)
 SRV1CNT		equ	RAMINI0+0x20		; speed
 PULSE1		equ	RAMINI0+0x21		; pulse duration
-MOVING		equ	RAMINI0+0x22		; moving flags
+CURRENTSTATE	equ	RAMINI0+0x22		; current_state
 POSITION	equ	RAMINI0+0x23		; current position flags
-STATE		equ	RAMINI0+0x24		; current state
-REACHED		equ	RAMINI0+0x25		; position reached
+PROGRAMMING_PHASE	equ	RAMINI0+0x24	; current programming phase
+POSITION_SAVE_CNT	equ	RAMINI0+0x25	; downcouter - on zero save position in eeprom  
+
 SPACE_H		equ	RAMINI0+0x26		; spacing duration
 SPACE_L		equ	RAMINI0+0x27
-RELEPULSE1	equ	RAMINI0+0x28		; biestable rele pulse
+RELEPULSE1	equ	RAMINI0+0x28		; bistable rele pulse
 
 DEBOUNCE1	equ	RAMINI0+0x2A		; key debouncing
 DEBOUNCEP	equ	RAMINI0+0x2B		; prog key debounce
@@ -169,15 +173,40 @@ FLAGS		equ	RAMINI0+0x30
 COUNT		equ	RAMINI0+0x32
 TEMP		equ	RAMINI0+0x33
 
+DATABF1		equ	RAMINI0+0x35   ; DCC data buffer for decoding
+DATABF2		equ	RAMINI0+0x36
+DATABF3		equ	RAMINI0+0x37
+DATABF4		equ	RAMINI0+0x38
+KEY_ADC		equ	RAMINI0+0x39
+
+DEB_AKEY_NO	equ	RAMINI0+0x3A  ;analog key debouncing
+DEB_AKEY_1	equ	RAMINI0+0x3B
+DEB_AKEY_2	equ	RAMINI0+0x3C
+DEB_AKEY_12	equ	RAMINI0+0x3D
+AKEY_STATE equ	RAMINI0+0x3E
+
 EEPTR		equ	RAMINI0+0x3F		; Page register
 
 
+
 ; --- Flags
+;#define POSITION_STATE WORK_STATE,0
+#define	MOVING_STATE			STATE,1
+#define	PROGRAMMING_STATE	STATE,2
+#define	ADR_PROG_STATE		STATE,3
+#define	REACHED_STATE			STATE,4
+
+;;  analog keyboard 
+#define	AKEY_UP			AKEY_STATE,0
+#define	AKEY_DOWN		AKEY_STATE,1
+#define	AKEY_UPDOWN	AKEY_STATE,2
+
 
 #define		NEW_PACKET	FLAGS,0		; New 3 byte packet received
-#define		DCC4BYTE	FLAGS,3		; DCC command 4 bytes
-#define		DO_PULSE	FLAGS,5		; do pulse, TMR1 end
-#define		RESET_FLG	FLAGS,7		; reset packet
+#define		DCC4BYTE		FLAGS,3		; DCC command 4 bytes
+#define		DO_PULSE		FLAGS,5		; do pulse, TMR1 end
+#define		DO_ADC			FLAGS,6		; ADC conversion end
+#define		RESET_FLG		FLAGS,7		; reset packet
 
 
 ; --------------- Program Section --------------------------------------
@@ -196,29 +225,32 @@ PowerUp:
 		org	0x004
 
 Interrupt:
-		movwf	INT_W			; save context registers		;1
-		swapf	STATUS,w							;2
-		movwf	INT_STAT							;3
+		movwf	INT_W				; save context registers		;1
+		swapf	STATUS,w					;2
+		movwf	INT_STAT					;3
 		clrf	STATUS			; interrupt uses bank 0			;4
 
 		btfss	PIR1,TMR1IF		; end of servo pulse?			;+1
-		goto	Int_DCC								;+2,3
+		goto	Int_DCC				;+2,3
 		bcf	SERVO			; yes, clear pulse			;+3
-		bcf	PIR1,TMR1IF							;+4
-		bsf	DO_PULSE							;+5
+		bcf	PIR1,TMR1IF			;+4
+		bsf	DO_PULSE				;+5
 
 Int_DCC:
 		btfss	INTCON,INTF		; RB0 interrupt?			;+4,	+6
-		goto	EndInt								;+5,6,	+7,8
-
-		btfss	DCCIN								;5
-		goto	Int_Low_Half							;6,7
+#ifdef __12F675		
+		goto	Int_ADC					;+5,6,	+7,8
+#else
+		goto	EndInt
+#endif		
+		btfss	DCCIN					;5
+		goto	Int_Low_Half	;6,7
 
 Int_High_Half:
-		movf	DCCSTATE,w							; 8
-		addwf	PCL,f								; 9
+		movf	DCCSTATE,w		; 8
+		addwf	PCL,f					; 9
 
-		goto	Preamble							; 10,11
+		goto	Preamble			; 10,11
 		goto	WaitLow
 		goto	ReadBit
 		goto	ReadBit
@@ -235,21 +267,30 @@ Int_High_Half:
 
 Int_Low_Half:
 		movlw	d'256' - d'80'		; 77us: between 64us (one) and 90us (zero);8
+		;movlw	d'256' - d'77'		; 77us: between  64us (one) and 90us (zero);11
 		movwf	TMR0								;9
 		bcf	INTCON,T0IF		; clear overflow flag for counting	;10
 		bcf	INTCON,INTF							;11
 		bsf	STATUS,RP0							;12
 		bsf	OPTION_REG,INTEDG	; next interrupt on rising edge GP2	;13
-		swapf	INT_STAT,w		; restore context registers		;14
-		movwf	STATUS								;15
-		swapf	INT_W,f								;16
-		swapf	INT_W,w								;17
-		retfie									;18,19
+		goto	EndInt
 
 EndHighHalf:
 		bcf	INTCON,INTF							;21
 		bsf	STATUS,RP0							;22
 		bcf	OPTION_REG,INTEDG	; next interrupt on falling edge GP2	;23
+		goto	EndInt
+    
+#ifdef __12F675     
+Int_ADC:
+		btfss	PIR1,ADIF		; end of ACD conversion
+		goto	EndInt					
+		bcf	PIR1,ADIF   ; clear interrupt flag
+		movf ADRESH,w
+		movwf KEY_ADC
+		; end of acd conversion routine    
+		bsf DO_ADC
+#endif    
 EndInt:
 		swapf	INT_STAT,w		; restore context registers		;24
 		movwf	STATUS								;25
@@ -348,26 +389,25 @@ EndByte4:
 ; ----------------------------------------------------------------------
 
 ; ----- Initialization
-
 INIT:
 		clrf	GPIO
 		movlw	0x07
 		movwf	CMCON			; set GP2:0 to digital I/O
 #ifdef __12F675     
-    movlw ADCON0_INI
-    movwf ADCON0
+		movlw	ADCON0_INI
+		movwf	ADCON0
 #endif
 		bsf	STATUS,RP0		; bank 1
 #ifdef __12F675 
-    movlw ADCON0_INI
-    movwf ANSEL     ; PIC12F675  Analog Select Register
+		movlw	ADCON0_INI
+		movwf	ANSEL     ; PIC12F675  Analog Select Register
 #endif   
 		movlw	GP_TRIS
 		movwf	TRISIO
-#ifndef OSCCAL_VALUE    
+#ifndef	OSCCAL_VALUE    
 		call	0x3FF			; get factory calibrated OSCCAL from last address of Flash
 #else
-    movlw OSCCAL_VALUE   ; set OSCCAL manualy 
+		movlw OSCCAL_VALUE	; set OSCCAL manually 
 #endif
 		movwf	OSCCAL
 		movlw	WPU_INI			; pull-ups
@@ -380,7 +420,7 @@ INIT:
 		movwf	PIE1
 		bcf	STATUS,RP0		; bank 0
 		clrf	PIR1
-		movlw	0x01			; Timer 1 on, 1:1
+		movlw	0x01			; Timer 1 on, 1:1   -  Fosc/4 = 1Mhz 
 		movwf	T1CON
 
 
@@ -395,13 +435,13 @@ ClearRAM:
 		goto	ClearRAM
 
 		movlw	INTC_INI
-		movwf	INTCON			; enable GP2 external interrupt
+		movwf	INTCON			; enable perypherial interupts - external interrupt GP2, ADC interupt
 
 		movlw	d'150'			; init servos default
 		movwf	PULSE1
 ;		clrf	MOVING
 ;		clrf	POSITION
-;		clrf	STATE
+;		clrf	CURRENTSTATE
 
 		call	LoadCV			; Load CV in SFR
 		call	LoadOutputs		; set servo to last position
@@ -416,7 +456,7 @@ MainLoop:
 
 		btfsc	DO_PULSE		; end of servo pulse?
 		call	DoServo			; yes, next pulse
-
+		clrwdt
 		goto	MainLoop
 
 
@@ -427,14 +467,14 @@ DoServo:
 		clrf	DCCSTATE		; yes, clear for decoding
 		bsf	INTCON,INTE		; re-enable interrupts
 DoServoJump:
-		movf	STATE,w
+		movf	CURRENTSTATE,w
 		andlw	0x03
 		addwf	PCL,f
 
 		goto	PulseServo1
 		goto	PulseServo2
 		goto	Spacing
-		clrf	STATE			; prevents erroneus contents
+		clrf	CURRENTSTATE			; prevents erroneus contents
 
 
 	if ($ > d'255') 
@@ -450,14 +490,14 @@ PulseServo1:
 		movf	PULSE1,w		; 200: 2ms, 100: 1ms
 		call	PulseServo
 
-		btfsc	MOVING,0
+		btfsc	MOVING_STATE
 		bcf	INTCON,INTE		; disable DCC interrupts for time accuracy
 
-		btfsc	MOVING,0
+		btfsc	MOVING_STATE
 		bsf	SERVO
 
 		bsf	T1CON,TMR1ON		; run timer 1
-		incf	STATE,f
+		incf	CURRENTSTATE,f
 
 		movf	RELEPULSE1,w		; relay pulse
 		btfss	STATUS,Z
@@ -472,7 +512,7 @@ PulseServo2:
 		movlw	d'150'			; 200: 2ms, 100: 1ms
 		call	PulseServo		; dummy pulse
 		bsf	T1CON,TMR1ON		; run timer 1
-		incf	STATE,f
+		incf	CURRENTSTATE,f
 
 ;		movf	RELEPULSE2,w		; relay pulse
 ;		btfss	STATUS,Z
@@ -497,8 +537,8 @@ Spacing:
 		addwf	TMR1H,f		
 ;		bcf	PIR1,TMR1IF
 		bsf	T1CON,TMR1ON		; run timer 1
-		clrf	STATE
-		goto	EndServo2
+		clrf	CURRENTSTATE
+		goto	CheckKey
 
 
 PulseServo:
@@ -547,13 +587,13 @@ EndSpacing:					; every 20ms
 
 
 EndServo1:
-		btfss	MOVING,0		; moving servo?
+		btfss	MOVING_STATE		; moving servo?
 		return				; no
 
 		btfss	POSITION,0		; yes	*************
 		goto	EndServo1Nxt
 		
-		btfsc	REACHED,0
+		btfsc	REACHED_STATE
 		goto	EndServo1WW1
 
 		decfsz	SRV1CNT,f		; speed
@@ -570,15 +610,15 @@ EndServo1W1:
 		return
 		movlw	REACH_PULS
 		movwf	SRV1CNT
-		bsf	REACHED,0
+		bsf	REACHED_STATE
 		return
 EndServo1WW1:
 		decfsz	SRV1CNT,f		; additional pulses
 		return
 		bcf	POSITION,0		; **********************
 EndServoSave:
-		bcf	REACHED,0
-		bcf	MOVING,0
+		bcf	REACHED_STATE
+		bcf	MOVING_STATE
 
 		movlw	d'5'			; 5 * 20ms relay pulse
 		movwf	RELEPULSE1
@@ -594,7 +634,7 @@ EndServoSave:
 		goto	SetParm
 
 EndServo1Nxt:
-		btfsc	REACHED,0
+		btfsc	REACHED_STATE
 		goto	EndServo1WW2
 
 		decfsz	SRV1CNT,f		; speed
@@ -610,7 +650,7 @@ EndServo1W2:
 		return
 		movlw	REACH_PULS
 		movwf	SRV1CNT
-		bsf	REACHED,0
+		bsf	REACHED_STATE
 		return
 EndServo1WW2:
 		decfsz	SRV1CNT,f
@@ -618,11 +658,18 @@ EndServo1WW2:
 		bsf	POSITION,0		; *****************
 		goto	EndServoSave
 
-
-EndServo2:					; every 20ms
+ChangePosition:
+		bsf	MOVING_STATE
+		movf	SPEED1,w
+		movwf	SRV1CNT
+		movlw POSITION_SAVE_DELAY  ; request to Save position
+		movwf POSITION_SAVE_CNT 
+		return
+			
+CheckKey: ; every 20ms
 		btfsc	SWITCH			; check program switch 
 		goto	ReadInputSwitch
-		decf	DEBOUNCE1,f		; *** for 2,5s
+		decf	DEBOUNCE1,f		; *** for 2,5s  ; decrement twice: 20ms * 128 = 2,56s
 		decfsz	DEBOUNCE1,f		; pressed, wait debounce time (2,5s)
 		return
 		goto	MainProg		; enter programming mode
@@ -631,11 +678,9 @@ ReadInputSwitch:
 		btfsc	STATUS,Z
 		return				; no
 Key_Change:
-						; servo move
-		bsf	MOVING,0
-		movf	SPEED1,w
-		movwf	SRV1CNT
 		clrf	DEBOUNCE1
+		; servo move
+		call ChangePosition
 		return
 
 
@@ -734,7 +779,7 @@ ProgRangeSpeed:
 		movf	EEPTR,w
 		call	SetParm
 		call	LoadCV
-		bsf	MOVING,0		; move to test
+		bsf	MOVING_STATE		; move to test
 		movf	SPEED1,w
 		movwf	SRV1CNT
 		goto	EndProg
@@ -750,7 +795,7 @@ ProgSetAddr:
 		movlw	EE_ADDR1L
 		call	SetParm			; save address
 		call	LoadCV
-		bsf	MOVING,0		; move to test
+		bsf		MOVING_STATE		; move to test
 		movf	SPEED1,w
 		movwf	SRV1CNT
 		goto	EndProg
@@ -819,14 +864,14 @@ AccSrv1:
 		btfss	STATUS,Z
 		goto	AccSrv1B
 		btfss	POSITION,0		; move servo
-		bsf	MOVING,0
+		bsf		MOVING_STATE
 		goto	AccSrv1C
 AccSrv1B:
 		xorlw	0x01			; other position?
 		btfss	STATUS,Z
 		goto	AccSrv2
 		btfsc	POSITION,0		; move servo
-		bsf	MOVING,0
+		bsf		MOVING_STATE
 AccSrv1C:
 		movf	SPEED1,w		; set speed
 		movwf	SRV1CNT
@@ -905,8 +950,8 @@ LoadOutputs:
 
 		movlw	0x10			; pulses for setting position
 		movwf	SRV1CNT
-		bsf	REACHED,0		; do move to reached position
-		bsf	MOVING,0
+		bsf	REACHED_STATE		; do move to reached position
+		bsf	MOVING_STATE
 
 		return
 
