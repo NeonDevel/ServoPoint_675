@@ -10,7 +10,7 @@
 ;; Date:            26.10.2007						;;
 ;; First release:   26.10.2007						;;
 ;; Last release by Paco  26.10.2007
-;; LastDate:        25.06.2017						;; 
+;; LastDate:        26.06.2017						;; 
 ;;									
 ;;======================================================================;;
 ;
@@ -33,8 +33,8 @@
 ; 											- DCC decoding fixed, 
 ; 											- Speed and Range configuration using Up/Down buttons
 ; 											- Speed settings limit from 1 fastest to 4 slowest, default 1
-; 											- Range from 5 to 50, default 25
-
+; 											- Range from 0 to 50, default 25
+; 26.06.2017  ver 2.1.2 - fixed flash prescaler, 10ms PPM period, code cleaned
 ;----------------------------------------
 ; configuration guide
 ; short press the [PROG] button  moves servo to opposite position
@@ -62,7 +62,7 @@
 ;---------------------------------------- 
 ; ----- Definitions
 
-#define		__VERDAY		0x25
+#define		__VERDAY		0x26
 #define		__VERMONTH	0x06
 #define		__VERYEAR		0x17
 #define		__VERNUM		D'1'
@@ -95,7 +95,7 @@
 FXTAL		equ	D'4000000'		; internal oscilator
 
 ; when needed OSCCAL can be set during programming
-;#define OSCCAL_VALUE 0x34
+#define OSCCAL_VALUE 0x34
 
 GP_TRIS			equ 0x1C			; GP2,GP3: inputs, GP4: analog input (bit=1 input; 0-output)
 ANSEL_INI		equ 0x28      ; GP4/AN3 pin - as analog input  ADCS2:0= 010 -> 32/Tosc = 8us conversion time
@@ -106,10 +106,10 @@ OPTION_INI	equ	0x88			; Option register: no pull-up, falling GP2, no prescaler, 
 INTC_INI		equ	0xD0			; GIE(bit7), PEIE enable(bit6),INTE enable(bit4), 
 
 RANGE_MAX   	equ d'50'
-RANGE_CENTER	equ d'25'
-RANGE_MIN			equ d'5'
+RANGE_DEFAULT	equ d'25'
+RANGE_MIN			equ d'0'
 RANGE_STEP		equ d'5'
-
+; pulse width = (150 +-Range) * 10 *1us = 1.5ms +-0.5ms =  (1ms .. 2ms)
 
 #define		RELE1A	GPIO,0			; Rele output straight - RED Led / Programming mode
 #define		RELE1B	GPIO,1			; Rele output diverge -  GREEN Led
@@ -168,14 +168,14 @@ SRVADRL1	equ	RAMINI0+0x11		;
 RANGE1		equ	RAMINI0+0x12		; servo range
 SPEED1		equ	RAMINI0+0x13		; servo speed
 
-PULSEH	equ	RAMINI0+0x14   ; calculated PWM pulse width = 100 * SPEED1
+PULSEH	equ	RAMINI0+0x14   ; calculated PWM pulse width = 100 * RANGE1
 PULSEL	equ	RAMINI0+0x15
 
 STATE			equ	RAMINI0+0x1F		; state of decoder (position,moving,programming)
-SRV1CNT		equ	RAMINI0+0x20		; speed
-PULSE1		equ	RAMINI0+0x21		; pulse duration
-SERVOSTATE	equ	RAMINI0+0x22		; current state
-POSITION	equ	RAMINI0+0x23		; current position flags
+SRV1CNT		equ	RAMINI0+0x20		; speed divider counter
+PULSE1		equ	RAMINI0+0x21		; current pulse duration
+SERVOSTATE	equ	RAMINI0+0x22	; current state
+POSITION	equ	RAMINI0+0x23		; current position flags ( inclination direction)
 PROGRAMMING_PHASE	equ	RAMINI0+0x24	; current programming phase
 
 
@@ -529,7 +529,7 @@ PulseServo1:
 
 
 PulseServo2:
-		movlw	d'150'			; 200: 2ms, 100: 1ms
+		movlw	d'150'			; 200: 2ms, 100: 1ms, 150: 1.5ms (center)
 		call	PulseServo		; dummy pulse
 		bsf	T1CON,TMR1ON		; run timer 1
 		incf	SERVOSTATE,f
@@ -544,19 +544,22 @@ Spacing:
 		movwf	TMR1H
 		movf	SPACE_L,w
 		movwf	TMR1L
-		movlw	0xE0			; 20ms time ( 0x10000 - 0x4E20 = 0xB1E0 )
+	
+	; 20ms time ( 0x10000 - 0x4E20 = 0xB1E0 )
+	; 10ms  ( 0x10000 - 0x2710 = 0xD8F0 )
+		movlw	0xF0  ;0xE0			
 		addwf	TMR1L,f
 		btfsc	STATUS,C
 		incf	TMR1H,f
-		movlw	0xB1
+		movlw	0xD8	;0xB1
 		addwf	TMR1H,f		
 ;		bcf	PIR1,TMR1IF
 		bsf	T1CON,TMR1ON		; run timer 1
 		clrf	SERVOSTATE
 		goto	CheckKey
 
-
-PulseServo:
+CalculatePulse:		
+		; W*10
 		bcf	T1CON,TMR1ON		; stop timer 1
 		clrf	TMR1H			; do PULSE x10
 		movwf	TEMPL
@@ -576,7 +579,10 @@ PulseServo:
 		addwf	TMR1L,f			; x9 + x1 = x10
 		btfsc	STATUS,C
 		incf	TMR1H,f
-
+	return
+	
+PulseServo:
+		call CalculatePulse
 		movf	TMR1L,w			; correct spacing
 		addwf	SPACE_L,f
 		btfsc	STATUS,C
@@ -723,27 +729,30 @@ ProgAddress:
 		goto	ProgAddress
 		bsf ADR_PROG_STATE    
 		clrf EEPTR
-		bsf	FLSH_PRE,3 ; div 8
+		bsf	FLSH_PRE,1 ;
 		call	SetFlash
 		goto ProgLoop
 ProgServoRange:    
 		clrf	EEPTR
 		bsf EEPTR,1  ; Range programming
-		bsf	FLSH_PRE,3
+		bsf	FLSH_PRE,1
 		call	SetFlash
 ProgLoop:
 		clrwdt
 		btfss	DO_PULSE		; every 65ms
 		goto	ProgKey
 		  ; set timer period  - 20ms  ( 0x10000 - 0x4E20 = 0xB1E0 )
-		movlw 0xE0
-		movwf TMR1L
-		movlw 0xB1
-		movwf TMR1H
+			; set timer period  - 10ms  ( 0x10000 - 0x2710 = 0xD8F0 )
+		;movlw 0xF0   ;0xE0
+		;movwf TMR1L
+		;movlw 0xD8		;0xB1
+		;movwf TMR1H
+		
 		bcf	DO_PULSE
 		decfsz	FLSH_PRE,f		; prescaler flash
 		goto	ProgKey
-		bsf	FLSH_PRE,3
+		bsf	FLSH_PRE,1   ; 0x01
+		;bsf	FLSH_PRE,3   ; 0x08
 		bcf	STATUS,C
 		btfsc	FLSH1,7
 		bsf	STATUS,C
@@ -940,7 +949,7 @@ ProgAKeySetSpeedValue:
     movwf	EEDATA0
     movf	EEPTR,w
 		call	SetParm
-    call SetPulseWidth
+    ;call SetPulseWidth
 ProgAKeySpeedEnd:    
     bcf AKEY_UP
     bcf AKEY_DOWN
@@ -970,7 +979,7 @@ ProgAKeyRangeDown:
 ProgAKeyRangeUpDown:   
     btfss AKEY_UPDOWN
     goto  ProgAKeyRangeEnd
-    movlw RANGE_CENTER  ;  
+    movlw RANGE_DEFAULT  ;  
 ProgAKeySetRangeValue:    
     movwf RANGE1
     movwf	EEDATA0
@@ -1153,48 +1162,6 @@ LoadOutputs:
 		bsf	MOVING_STATE
 		return
 
-		; ----------------------------------------------------------------------
-SetPulseWidth:    
-		;100 * SPEED1
-		movf SPEED1,w
-		movwf	TEMPL
-		clrf	TEMPH			; do SPEED x 100 =  SPEED*(4+32+64)
-		bcf	STATUS,C	
-		rlf	TEMPL,f     ; x2
-		rlf	TEMPH,f
-		bcf	STATUS,C	
-		rlf	TEMPL,f			; x4
-		rlf	TEMPH,f
-		movf TEMPL,w
-		movwf PULSEL
-		movf TEMPH,w
-		movwf PULSEH
-		
-		bcf	STATUS,C	
-		rlf	TEMPL,f     ; x8
-		rlf	TEMPH,f
-		bcf	STATUS,C	
-		rlf	TEMPL,f			; x16
-		rlf	TEMPH,f
-		bcf	STATUS,C	
-		rlf	TEMPL,f			; x32
-		rlf	TEMPH,f
-		movf TEMPL,w
-		addwf PULSEL,f
-		btfsc	STATUS,C
-		incf	PULSEH,f
-		movf TEMPH,w
-		addwf PULSEH,f
-		bcf	STATUS,C	
-		rlf	TEMPL,f			; x64
-		rlf	TEMPH,f
-		movf TEMPL,w
-		addwf PULSEL,f
-		btfsc	STATUS,C
-		incf	PULSEH,f
-		movf TEMPH,w
-		addwf PULSEH,f
-		return		
 
 ;----- Internal EEPROM routines ------------------------------------------------
 
