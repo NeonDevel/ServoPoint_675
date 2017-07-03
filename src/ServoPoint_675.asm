@@ -10,7 +10,7 @@
 ;; Date:            26.10.2007						;;
 ;; First release:   26.10.2007						;;
 ;; Last release by Paco  26.10.2007
-;; LastDate:        26.06.2017						;; 
+;; LastDate:        03.07.2017						;; 
 ;;									
 ;;======================================================================;;
 ;
@@ -29,32 +29,35 @@
 ; 15.06.2017  initial version - works on both processors PIC12F675 and PIC12F675
 ; 16.06.2017  ver 2.0.1 - new hardware version, LED connected to RELE1A, UP/Down buttons on GP4/AN3
 ; 20.06.2017  ver 2.0.2 - added new variables, and ADC interrupt handler. Bug since v 2.0.1 - DCC doesn't work
-; 25.06.2017  ver 2.1.1 - Pic12F675 version only, 
+; 25.06.2017 	ver 2.1.1	- Pic12F675 version only, 
 ; 											- DCC decoding fixed, 
 ; 											- Speed and Range configuration using Up/Down buttons
 ; 											- Speed settings limit from 1 fastest to 4 slowest, default 1
 ; 											- Range from 0 to 50, default 25
-; 26.06.2017  ver 2.1.2 - fixed flash prescaler, 10ms PPM period, code cleaned
+; 26.06.2017 ver 2.1.2	- fixed flash prescaller, 10ms PPM period
+; 03.07.2017 ver 2.1.4	- production version (speed range 1-4), positive angle range 2-50 with step 2 [0.1ms]  
+; 											
+; 											
 ;----------------------------------------
 ; configuration guide
-; short press the [PROG] button  moves servo to opposite position
+; short press the [PROG] button moves servo to opposite position
 ; hold the [PROG] button  for 2.5s - 5s PROG_LED turns on 
 ; when button released  - device enters RANGE configuration mode
 ;	hold the [PROG] button  longer than 5s - PROG_LED turns off
 ;	when button released - device enters ADDRESS programming mode
 ; 
-;	In ADDRESS programming mode PROG_LED blinks slow with 1s period and 50% duty cycle
-;		send accessory move command from command station to stores new address value, OR 
+;	In ADDRESS programming mode PROG_LED blinks slow with 1s period and 50% duty cycle.
+;		send accessory move command from command station to store new address value, OR 
 ;		press simultaneous UP & DOWN buttons to set default address (1) 
-;		both above actions or short press the [PROG] button exits from programming mode 
+;		both above actions or short press the [PROG] button exits from programming mode. 
 ;
 ;	In RANGE programming mode PROG_LED gives 2 short flashes followed by pause in 1s period
 ;		use [UP], [DOWN] buttons to change maximum servo angle
-;		ToDo: press simultaneous UP & DOWN buttons to set central position
+;		press simultaneous UP & DOWN buttons to set central position
 ;		short press [PROG] button to save RANGE value and enter SPEED programming mode
 ;	In SPEED programming mode PROG_LED gives 3 short flashes followed by pause in 1s period
 ;		use [UP], [DOWN] buttons to change servo speed
-;		press simultaneous UP & DOWN buttons to set default speed
+;		press simultaneous UP & DOWN buttons to set default (maximum) speed
 ;		short press [PROG] button to save SPEED value and exit programming mode
 ; 
 
@@ -62,8 +65,8 @@
 ;---------------------------------------- 
 ; ----- Definitions
 
-#define		__VERDAY		0x26
-#define		__VERMONTH	0x06
+#define		__VERDAY		0x03
+#define		__VERMONTH	0x07
 #define		__VERYEAR		0x17
 #define		__VERNUM		D'1'
 
@@ -94,11 +97,11 @@
 
 FXTAL		equ	D'4000000'		; internal oscilator
 
-; when needed OSCCAL can be set during programming
-#define OSCCAL_VALUE 0x34
+; when OSCCAL production calibration is lost, it can be set manually
+;#define OSCCAL_VALUE 0x34
 
 GP_TRIS			equ 0x1C			; GP2,GP3: inputs, GP4: analog input (bit=1 input; 0-output)
-ANSEL_INI		equ 0x28      ; GP4/AN3 pin - as analog input  ADCS2:0= 010 -> 32/Tosc = 8us conversion time
+ANSEL_INI		equ 0x68 ;28     ; GP4/AN3 pin - as analog input  ADCS2:0= 110 -> Tosc/64 = 16us conversion time
 ADCON0_INI	equ 0x0C      ; AN3 connected to Sample&Hold , VDD - as voltage reference, result Left justified
 WPU_INI			equ 0x23			; Weak pull-up enable only on outputs GP0,GP1,GP5, (turned off when output)
 PIE1_INI   	equ	0x41			; interrupt TMR1 (bit0), ADIE(bit6) 
@@ -106,10 +109,17 @@ OPTION_INI	equ	0x88			; Option register: no pull-up, falling GP2, no prescaler, 
 INTC_INI		equ	0xD0			; GIE(bit7), PEIE enable(bit6),INTE enable(bit4), 
 
 RANGE_MAX   	equ d'50'
-RANGE_DEFAULT	equ d'25'
-RANGE_MIN			equ d'0'
-RANGE_STEP		equ d'5'
+RANGE_DEFAULT	equ d'2'
+RANGE_MIN			equ d'2'
+RANGE_STEP		equ d'2'
 ; pulse width = (150 +-Range) * 10 *1us = 1.5ms +-0.5ms =  (1ms .. 2ms)
+SPEED_MAX 		equ d'1'
+SPEED_DEFAULT	equ d'1'
+SPEED_MIN 		equ d'4'
+SPEED_STEP		equ d'1'
+
+
+
 
 #define		RELE1A	GPIO,0			; Rele output straight - RED Led / Programming mode
 #define		RELE1B	GPIO,1			; Rele output diverge -  GREEN Led
@@ -126,7 +136,9 @@ THR_K1	equ	d'190'
 THR_K2	equ	d'150'
 THR_K12	equ	d'115'
 THR_KERR	equ d'90'
-DEBOUNCE_COUNT	equ	4
+DEBOUNCE_COUNT	equ	0x03  ;bit
+DEBOUNCE_NOKEY_COUNT equ 0x02; bit
+
 
 ; --- EEPROM Section
 
@@ -134,8 +146,8 @@ DEBOUNCE_COUNT	equ	4
 
 EE_ADDR1H	equ	EE_INI+0x00
 EE_ADDR1L	equ	EE_INI+0x01
-EE_RANGE1	equ	EE_INI+0x02
-EE_SPEED1	equ	EE_INI+0x03
+EE_RANGE	equ	EE_INI+0x02
+EE_SPEED	equ	EE_INI+0x03
 
 EE_OUT		equ	EE_INI+0x7F		; saved outputs
 
@@ -150,10 +162,10 @@ INT_W			equ	RAMINI0+0x00		; interrupt context registers
 INT_STAT	equ	RAMINI0+0x01
 
 SHIFT0		equ	RAMINI0+0x02
-DATA1			equ	RAMINI0+0x03
-DATA2			equ	RAMINI0+0x04
-DATA3			equ	RAMINI0+0x05
-DATA4			equ	RAMINI0+0x06
+DCCDATA1	equ	RAMINI0+0x03  ; DCC data buffer for incoming data
+DCCDATA2	equ	RAMINI0+0x04
+DCCDATA3	equ	RAMINI0+0x05
+DCCDATA4	equ	RAMINI0+0x06
 
 PREAMBLE	equ	RAMINI0+0x08
 DCCSTATE	equ	RAMINI0+0x09
@@ -165,30 +177,30 @@ EEADR0		equ	RAMINI0+0x0C
 
 SRVADRH1	equ	RAMINI0+0x10		; servo address
 SRVADRL1	equ	RAMINI0+0x11		; 
-RANGE1		equ	RAMINI0+0x12		; servo range
-SPEED1		equ	RAMINI0+0x13		; servo speed
+RANGE			equ	RAMINI0+0x12		; servo range
+SPEED			equ	RAMINI0+0x13		; servo speed
 
-PULSEH	equ	RAMINI0+0x14   ; calculated PWM pulse width = 100 * RANGE1
-PULSEL	equ	RAMINI0+0x15
+PULSEH		equ	RAMINI0+0x14   ; calculated PWM pulse width = 100 * RANGE1
+PULSEL		equ	RAMINI0+0x15
 
-STATE			equ	RAMINI0+0x1F		; state of decoder (position,moving,programming)
-SRV1CNT		equ	RAMINI0+0x20		; speed divider counter
-PULSE1		equ	RAMINI0+0x21		; current pulse duration
-SERVOSTATE	equ	RAMINI0+0x22	; current state
-POSITION	equ	RAMINI0+0x23		; current position flags ( inclination direction)
+STATE							equ	RAMINI0+0x1F		; state of decoder (position,moving,programming)
+SRV1CNT						equ	RAMINI0+0x20		; speed divider counter
+CURRENT_PULSE			equ	RAMINI0+0x21		; current pulse duration
+SERVOSTATE				equ	RAMINI0+0x22	; current state
+POSITION					equ	RAMINI0+0x23		; current position flags ( inclination direction)
 PROGRAMMING_PHASE	equ	RAMINI0+0x24	; current programming phase
 
 
 SPACE_H			equ	RAMINI0+0x26		; spacing duration
 SPACE_L			equ	RAMINI0+0x27
-RELEPULSE1	equ	RAMINI0+0x28		; biestable rele pulse
+RELEPULSE		equ	RAMINI0+0x28		; bistable relay pulse
 
-DEBOUNCE1	equ	RAMINI0+0x2A		; key debouncing
-DEBOUNCEP	equ	RAMINI0+0x2B		; prog key debounce
-TIMER			equ	RAMINI0+0x2C		; for prescaler prog key debouncing
-FLSH_PRE	equ	RAMINI0+0x2D		; flash prescaler
-FLSH1			equ	RAMINI0+0x2E		; flash sequence
-FLSH2			equ	RAMINI0+0x2F		; 
+DEBOUNCE_PROG_CNT	equ	RAMINI0+0x2A	; PROG key debouncing counter for long periods
+DEBOUNCE_PROG_REG	equ	RAMINI0+0x2B	; PROG key debouncing shift register for short periods
+TARGET_PULSE 			equ	RAMINI0+0x2C  ; target pulse width calculated for position and range
+FLSH_PRE					equ	RAMINI0+0x2D		; flash prescaler
+FLSH1							equ	RAMINI0+0x2E		; flash sequence
+FLSH2							equ	RAMINI0+0x2F		; 
 
 FLAGS			equ	RAMINI0+0x30
 
@@ -196,10 +208,10 @@ COUNT			equ	RAMINI0+0x32
 TEMPL			equ	RAMINI0+0x33
 TEMPH			equ	RAMINI0+0x34
 
-DATABF1		equ	RAMINI0+0x35   ; DCC data buffer for decoding
-DATABF2		equ	RAMINI0+0x36
-DATABF3		equ	RAMINI0+0x37
-DATABF4		equ	RAMINI0+0x38
+DCCDATABF1		equ	RAMINI0+0x35   ; DCC data buffer for decoding
+DCCDATABF2		equ	RAMINI0+0x36
+DCCDATABF3		equ	RAMINI0+0x37
+DCCDATABF4		equ	RAMINI0+0x38
 KEY_ADC		equ	RAMINI0+0x39
 
 DEB_AKEY_NO	equ	RAMINI0+0x3A  ;analog key debouncing
@@ -224,6 +236,8 @@ EEPTR		equ	RAMINI0+0x3F		; Page register
 
 
 #define		NEW_PACKET	FLAGS,0		; New 3 byte packet received
+#define 	END_PULSE		FLAGS,1		; time to check PROG SWITCh
+#define   DO_CHANGE_POS  FLAGS,2;  ; Move Servo to opposite position 
 #define		DCC4BYTE		FLAGS,3		; DCC command 4 bytes
 #define		DO_PULSE		FLAGS,5		; do pulse, TMR1 end
 #define		DO_ADC			FLAGS,6		; ADC conversion end
@@ -339,23 +353,23 @@ WaitLow:
 		incf	DCCSTATE,f		; then state				;13
 		clrf	DCCBYTE			;					;14
 		clrf	PREAMBLE		;					;15
-		clrf	DATA4			;					;16
+		clrf	DCCDATA4			;					;16
 		goto	EndHighHalf		;					;17,18
 
 
 ReadBit:
-		bsf	STATUS,C							;12
+		bsf		STATUS,C							;12
 		btfsc	INTCON,T0IF		; if timer 0 overflows then is a DCC zero;13
-		bcf	STATUS,C							;14
-		rlf	SHIFT0,f		; receiver shift register		;15
+		bcf		STATUS,C							;14
+		rlf		SHIFT0,f		; receiver shift register		;15
 		incf	DCCSTATE,f		;					;16
 		goto	EndHighHalf		;					;17,18
 			
 ReadLastBit:
-		bsf	STATUS,C							;12
+		bsf		STATUS,C							;12
 		btfsc	INTCON,T0IF		; if timer 0 overflows then is a DCC zero;13
-		bcf	STATUS,C							;14
-		rlf	SHIFT0,f		; receiver shift register		;15
+		bcf		STATUS,C							;14
+		rlf		SHIFT0,f		; receiver shift register		;15
 		incf	DCCBYTE,w							;16
 		addwf	DCCSTATE,f							;17
 		goto	EndHighHalf		;					;18,19
@@ -366,7 +380,7 @@ EndByte1:
 		movlw	0x02			;					;14
 		movwf	DCCSTATE		;					;15
 		movf	SHIFT0,w		;					;16
-		movwf	DATA1			;					;17
+		movwf	DCCDATA1			;				;17
 		incf	DCCBYTE,f		;					;18
 		goto	EndHighHalf		;					;19,20
 
@@ -376,7 +390,7 @@ EndByte2:
 		movlw	0x02			;					;14
 		movwf	DCCSTATE		;					;15
 		movf	SHIFT0,w		;					;16
-		movwf	DATA2			;					;17
+		movwf	DCCDATA2			;					;17
 		incf	DCCBYTE,f		;					;18
 		goto	EndHighHalf		;					;19,20
 
@@ -387,16 +401,16 @@ EndByte3:
 		movlw	0x02			;					;14
 		movwf	DCCSTATE		;					;15
 		movf	SHIFT0,w		;					;16
-		movwf	DATA3			;					;17
+		movwf	DCCDATA3			;					;17
 		incf	DCCBYTE,f		;					;18
-		bsf	DCC4BYTE		;					;19
+		bsf		DCC4BYTE		;					;19
 		goto	EndHighHalf		;					;20,21
 EndByte3x:
 		clrf	DCCSTATE		;					;15
 		movf	SHIFT0,w		;					;16
-		movwf	DATA3			;					;17
-		bsf	NEW_PACKET		;					;18
-		bcf	DCC4BYTE		;					;19
+		movwf	DCCDATA3			;					;17
+		bsf		NEW_PACKET		;					;18
+		bcf		DCC4BYTE		;					;19
 		goto	EndHighHalf		;					;20,21
 
 EndByte4:
@@ -404,8 +418,8 @@ EndByte4:
 		btfsc	INTCON,T0IF		; End bit=1, end of packet		;13
 		goto	EndInt			; End bit=0, invalid packet		;14,15
 		movf	SHIFT0,w		;					;15
-		movwf	DATA4			;					;16
-		bsf	NEW_PACKET		;					;17
+		movwf	DCCDATA4			;					;16
+		bsf		NEW_PACKET		;					;17
 		goto	EndHighHalf		;					;18,19
 
 
@@ -458,11 +472,7 @@ ClearRAM:
 		movwf	INTCON			; enable GP2 external interrupt
 
 		movlw	d'150'			; init servos default
-		movwf	PULSE1
-;		clrf	MOVING
-;		clrf	POSITION
-;		clrf	SERVOSTATE
-
+		movwf	CURRENT_PULSE
 		call	LoadCV			; Load CV in SFR
 		call	LoadOutputs		; set servo to last position
 
@@ -477,6 +487,10 @@ MainLoop:
 		btfsc	DO_PULSE		; end of servo pulse?
 		call	DoServo			; yes, next pulse
 		clrwdt
+		btfss	END_PULSE		; every 10ms END_PULSE
+		goto	MainLoop
+		bcf END_PULSE
+		call CheckKey
 		goto	MainLoop
 
 
@@ -507,7 +521,7 @@ PulseServo1:
 		clrf	SPACE_H			; init spacing value (20ms)
 		clrf	SPACE_L
 
-		movf	PULSE1,w		; 200: 2ms, 100: 1ms
+		movf	CURRENT_PULSE,w		; 200: 2ms, 100: 1ms
 		call	PulseServo
 
 		btfsc	MOVING_STATE
@@ -519,9 +533,9 @@ PulseServo1:
 		bsf	T1CON,TMR1ON		; run timer 1
 		incf	SERVOSTATE,f
 
-		movf	RELEPULSE1,w		; relay pulse
+		movf	RELEPULSE,w		; relay pulse
 		btfss	STATUS,Z
-		decfsz	RELEPULSE1,f
+		decfsz	RELEPULSE,f
 		goto	EndSpacing
 		bcf	RELE1A
 		bcf	RELE1B
@@ -556,7 +570,8 @@ Spacing:
 ;		bcf	PIR1,TMR1IF
 		bsf	T1CON,TMR1ON		; run timer 1
 		clrf	SERVOSTATE
-		goto	CheckKey
+		bsf END_PULSE
+		return
 
 CalculatePulse:		
 		; W*10
@@ -605,28 +620,28 @@ PulseServo:
 
 EndSpacing:					; every 20ms
 		return
-
-
+		
 EndServo1:
 		btfss	MOVING_STATE		; moving servo?
 		return				; no
-
+		
+EndServo1a:		
 		btfss	POSITION,0		; yes	*************
 		goto	EndServo1Nxt
-		
+EndServo1b:		
 		btfsc	REACHED_STATE
 		goto	EndServo1WW1
 
 		decfsz	SRV1CNT,f		; speed
 		goto	EndServo1W1
-		movf	SPEED1,w
+		movf	SPEED,w
 		movwf	SRV1CNT
-		decf	PULSE1,f
+		decf	CURRENT_PULSE,f
 EndServo1W1:
-		comf	RANGE1,w		; range (negative)
+		comf	RANGE,w		; range (negative)
 		addlw	0x01
 		addlw	d'150'
-		xorwf	PULSE1,w
+		xorwf	CURRENT_PULSE,w
 		btfss	STATUS,Z
 		return
 		movlw	REACH_PULS
@@ -636,13 +651,16 @@ EndServo1W1:
 EndServo1WW1:
 		decfsz	SRV1CNT,f		; additional pulses
 		return
+		btfsc DO_CHANGE_POS
 		bcf	POSITION,0		; **********************
 EndServoSave:
+		bcf DO_CHANGE_POS
 		bcf	REACHED_STATE
 		bcf	MOVING_STATE
-
-		movlw	d'5'			; 5 * 20ms relay pulse
-		movwf	RELEPULSE1
+		btfsc PROGRAMMING_STATE
+		return					; 
+		movlw	d'10'			; 10 * 10ms relay pulse
+		movwf	RELEPULSE
 		btfss	POSITION,0
 		bsf	RELE1A
 		btfsc	POSITION,0
@@ -660,13 +678,13 @@ EndServo1Nxt:
 
 		decfsz	SRV1CNT,f		; speed
 		goto	EndServo1W2
-		movf	SPEED1,w
+		movf	SPEED,w
 		movwf	SRV1CNT
-		incf	PULSE1,f
+		incf	CURRENT_PULSE,f
 EndServo1W2:
 		movlw	d'150'			; range
-		addwf	RANGE1,w
-		xorwf	PULSE1,w
+		addwf	RANGE,w
+		xorwf	CURRENT_PULSE,w
 		btfss	STATUS,Z
 		return
 		movlw	REACH_PULS
@@ -676,28 +694,28 @@ EndServo1W2:
 EndServo1WW2:
 		decfsz	SRV1CNT,f
 		return
+		btfsc DO_CHANGE_POS
 		bsf	POSITION,0		; *****************
 		goto	EndServoSave
 
-
-	
 CheckKey:				; every 20ms
 		btfsc	SWITCH			; check program switch 
 		goto	ReadInputSwitch
-		decf	DEBOUNCE1,f		; *** for 2,5s
-		decfsz	DEBOUNCE1,f		; pressed, wait debounce time (2,5s)
+		decf	DEBOUNCE_PROG_CNT,f		; *** for 2,5s
+		decfsz DEBOUNCE_PROG_CNT,f		; pressed, wait debounce time (2,5s)
 		return
 		goto	ProgMain		; enter programming mode
 ReadInputSwitch:
-		movf	DEBOUNCE1,w		; short pressed?
+		movf	DEBOUNCE_PROG_CNT,w		; short pressed?
 		btfsc	STATUS,Z
 		return				; no
 Key_Change:
-						; servo move
+		; servo move
+		bsf DO_CHANGE_POS
 		bsf	MOVING_STATE
-		movf	SPEED1,w
+		movf	SPEED,w
 		movwf	SRV1CNT
-		clrf	DEBOUNCE1
+		clrf	DEBOUNCE_PROG_CNT
 		return
 
 
@@ -710,8 +728,7 @@ ProgMain:
 		bsf ADCON0,ADON     ; enable ADC for analog keyboard 
 		bsf	LED			; LED on
 		movlw 0x26     ;; 38*65ms = 2.5s  to enter address programming mode
-		movwf DEBOUNCE1 ; in next 2.5s enter address programming mode.
-		bsf ADCON0,GO_NOT_DONE  ; start conversion
+		movwf DEBOUNCE_PROG_CNT ; in next 2.5s enter address programming mode.
 ProgStep1: 
 		clrwdt  
 		btfsc SWITCH				; wait to release 
@@ -719,40 +736,36 @@ ProgStep1:
 		btfss	DO_PULSE			;every 65ms
 		goto ProgStep1 
 		bcf DO_PULSE 
-		decfsz	DEBOUNCE1,f  
-		goto ProgStep1 
+		decfsz	DEBOUNCE_PROG_CNT,f  
+		goto ProgStep1
 		; address programming mode
 ProgAddress:
 		clrwdt
 		bcf LED   ; again LED is off  
 		btfss	SWITCH			; wait to release
 		goto	ProgAddress
+		bsf ADCON0,GO_NOT_DONE  ; start conversion
 		bsf ADR_PROG_STATE    
 		clrf EEPTR
 		bsf	FLSH_PRE,1 ;
 		call	SetFlash
 		goto ProgLoop
-ProgServoRange:    
+ProgServoRange:  
+		bsf ADCON0,GO_NOT_DONE  ; start conversion  
 		clrf	EEPTR
 		bsf EEPTR,1  ; Range programming
 		bsf	FLSH_PRE,1
 		call	SetFlash
 ProgLoop:
 		clrwdt
-		btfss	DO_PULSE		; every 65ms
+		btfsc	DO_PULSE		
+		call	DoServo
+		btfss END_PULSE  ; every 10ms
 		goto	ProgKey
-		  ; set timer period  - 20ms  ( 0x10000 - 0x4E20 = 0xB1E0 )
-			; set timer period  - 10ms  ( 0x10000 - 0x2710 = 0xD8F0 )
-		;movlw 0xF0   ;0xE0
-		;movwf TMR1L
-		;movlw 0xD8		;0xB1
-		;movwf TMR1H
-		
-		bcf	DO_PULSE
+		bcf END_PULSE
 		decfsz	FLSH_PRE,f		; prescaler flash
-		goto	ProgKey
-		bsf	FLSH_PRE,1   ; 0x01
-		;bsf	FLSH_PRE,3   ; 0x08
+		goto	ProgADC
+		bsf	FLSH_PRE,4   ; 0x16
 		bcf	STATUS,C
 		btfsc	FLSH1,7
 		bsf	STATUS,C
@@ -797,7 +810,7 @@ KeyERR:
 KeyReleased:
     bsf STATUS,C
     rlf DEB_AKEY_NO
-    btfss DEB_AKEY_NO,DEBOUNCE_COUNT
+    btfss DEB_AKEY_NO,DEBOUNCE_NOKEY_COUNT
     goto KeyEnd
     btfsc DEB_AKEY_1,DEBOUNCE_COUNT
     bsf AKEY_UP
@@ -816,14 +829,14 @@ KeyUp:
     btfsc DEB_AKEY_12,DEBOUNCE_COUNT
     goto KeyEnd
     bsf STATUS,C      ; key still pressed
-    rlf DEB_AKEY_1
+		rlf DEB_AKEY_1
     goto KeyEnd
 KeyDown:
     btfsc DEB_AKEY_12,DEBOUNCE_COUNT  ;manage releasing keys 
     goto KeyEnd
     clrf DEB_AKEY_1
     bsf STATUS,C        ; key still pressed
-    rlf DEB_AKEY_2      
+    rlf DEB_AKEY_2     
     goto KeyEnd
 KeyUpDown:
     clrf DEB_AKEY_1
@@ -834,20 +847,17 @@ KeyUpDown:
 KeyEnd:    
     bsf ADCON0,GO_NOT_DONE  ; start conversion
 ProgKey:
-		decfsz	TIMER,f			; debounce time
-		goto	ProgNoKey
-		bsf	TIMER,2
 		bcf	STATUS,C		; check key
 		btfsc	SWITCH
 		bsf	STATUS,C
-		rlf	DEBOUNCEP,w
-		movwf	DEBOUNCEP
+		rlf	DEBOUNCE_PROG_REG,w
+		movwf	DEBOUNCE_PROG_REG
 		xorlw	0xC0
 		btfss	STATUS,Z
 		goto	ProgNoKey
 		movf EEPTR,w
     btfsc STATUS,Z
-    goto EndProg   ; exit from address programing
+    goto EndProg   ; exit from address programming
 		btfss	EEPTR,1
 		incf	EEPTR,f
 		incf	EEPTR,f
@@ -872,12 +882,12 @@ ProgNoKey:
     btfss AKEY_UPDOWN
     goto ProgAkeyAddressEnd
     ; up and down pressed during address programming
-    ; reset addres
+    ; reset address
     bcf AKEY_UPDOWN
     movlw 0x81
-    movwf DATABF1
+    movwf DCCDATABF1
     movlw 0xF8
-    movwf DATABF2
+    movwf DCCDATABF2
     goto	ProgSetAddr		; address
 ProgAkeyAddressEnd:
 		btfss	NEW_PACKET		; new packet?
@@ -885,33 +895,33 @@ ProgAkeyAddressEnd:
 
 DecodeProg:
     ; copy DATA to decoder buffer
-    movf DATA1,w
-    movwf DATABF1
-    movf DATA2,w
-    movwf DATABF2
-    movf DATA3,w
-    movwf DATABF3
-    movf DATA4,w
-    movwf DATABF4
+    movf DCCDATA1,w
+    movwf DCCDATABF1
+    movf DCCDATA2,w
+    movwf DCCDATABF2
+    movf DCCDATA3,w
+    movwf DCCDATABF3
+    movf DCCDATA4,w
+    movwf DCCDATABF4
 		
 		bcf	NEW_PACKET		; prepare for next packet
 		bcf	INTCON,INTE		; disable interrupts for more speed
 
-		movf	DATA1,w			; exclusive or check
-		xorwf	DATA2,w
-		xorwf	DATA3,w
-		xorwf	DATA4,w
+		movf	DCCDATABF1,w			; exclusive or check
+		xorwf	DCCDATABF2,w
+		xorwf	DCCDATABF3,w
+		xorwf	DCCDATABF4,w
 
 		btfss	STATUS,Z		; valid packet?
 		goto	ExitDecodeProg		; no, return
 
-		movf	DATABF1,w			;'10AAAAAA'  '1AAADxxx' AAA:111 D:1 activate
+		movf	DCCDATABF1,w			;'10AAAAAA'  '1AAADxxx' AAA:111 D:1 activate
 		andlw	0xC0
 		xorlw	0x80			;'10xxxxxx'? accessory operation
-		btfsc	DATABF2,7
+		btfsc	DCCDATABF2,7
 		btfss	STATUS,Z
 		goto	ExitDecodeProg
-		btfss	DATABF2,3			; activate?
+		btfss	DCCDATABF2,3			; activate?
 		goto	ExitDecodeProg
 		goto	ProgSetAddr		; address
 
@@ -922,34 +932,38 @@ ProgAKeyRangeSpeed:
     ; Prog Speed
     btfss AKEY_UP
     goto  ProgAKeySpeedDown
+		bcf AKEY_UP
     ; keyUp
-    movlw d'1'    ;it is max speed, the more the slow
-    subwf SPEED1,w  
+    movlw SPEED_MAX    ;it is the max speed, the more the slowly
+    subwf SPEED,w  
     btfsc STATUS,Z 
     goto ProgAKeySpeedEnd  
-    movlw d'1'     ;-1 decrement
-		subwf SPEED1,w
+    movlw SPEED_STEP     ;decrement
+		subwf SPEED,w
     goto ProgAKeySetSpeedValue    
 ProgAKeySpeedDown:   
     btfss AKEY_DOWN
     goto  ProgAKeySpeedUpDown
-    movlw d'4'   ; min speed
-    subwf SPEED1,w  
+    bcf AKEY_DOWN
+		movlw SPEED_MIN  
+    subwf SPEED,w  
     btfsc STATUS,Z 
     goto ProgAKeySpeedEnd  
-    movlw d'1'   ; +1 increment
-    addwf SPEED1,w
+    movlw SPEED_STEP   ; increment
+    addwf SPEED,w
     goto ProgAKeySetSpeedValue      
 ProgAKeySpeedUpDown:   
     btfss AKEY_UPDOWN
     goto  ProgAKeySpeedEnd
-    movlw d'1'  ; default speed
+		bcf AKEY_UPDOWN
+    movlw SPEED_DEFAULT  
 ProgAKeySetSpeedValue:    
-    movwf SPEED1
+    movwf SPEED
     movwf	EEDATA0
     movf	EEPTR,w
 		call	SetParm
-    ;call SetPulseWidth
+		bsf DO_CHANGE_POS
+		call Key_Change
 ProgAKeySpeedEnd:    
     bcf AKEY_UP
     bcf AKEY_DOWN
@@ -959,33 +973,37 @@ ProgAKeyRange:
     btfss AKEY_UP
     goto  ProgAKeyRangeDown
     ; keyUp
+		bcf AKEY_UP
     movlw RANGE_MAX    
-    subwf RANGE1,w
+    subwf RANGE,w
     btfsc STATUS,Z 
     goto ProgAKeyRangeEnd  
     movlw RANGE_STEP     ;+5
-    addwf RANGE1,w
+    addwf RANGE,w
     goto ProgAKeySetRangeValue
 ProgAKeyRangeDown:   
     btfss AKEY_DOWN
     goto  ProgAKeyRangeUpDown
-    movlw RANGE_MIN   ;  min
-    subwf RANGE1,w  
+    bcf AKEY_DOWN
+		movlw RANGE_MIN   ;  min
+    subwf RANGE,w  
     btfsc STATUS,Z 
     goto ProgAKeyRangeEnd  
-    movlw RANGE_STEP   ; -5
-    subwf RANGE1,w
+    movlw RANGE_STEP   
+    subwf RANGE,w
     goto ProgAKeySetRangeValue
 ProgAKeyRangeUpDown:   
     btfss AKEY_UPDOWN
     goto  ProgAKeyRangeEnd
-    movlw RANGE_DEFAULT  ;  
+    bcf AKEY_UPDOWN
+		movlw RANGE_DEFAULT  ;  
 ProgAKeySetRangeValue:    
-    movwf RANGE1
+    movwf RANGE
     movwf	EEDATA0
     movf	EEPTR,w
 		call	SetParm
-    ;call SetPulseWidth
+		call SetServoPositionNoChange	
+	
 ProgAKeyRangeEnd:    
     bcf AKEY_UP
     bcf AKEY_DOWN
@@ -993,18 +1011,25 @@ ProgAKeyRangeEnd:
     goto  ProgLoop
     
 ProgSetAddr:
-		movf	DATABF1,w
+		movf	DCCDATABF1,w
 		movwf	EEDATA0
 		movlw	EE_ADDR1H
 		call	SetParm			; save address
-		movf	DATABF2,w
+		movf	DCCDATABF2,w
     andlw 0xFE    ; make sure, address not depending on coil select bit D in '1AAA1CCD' 
 		movwf	EEDATA0
 		movlw	EE_ADDR1L
 		call	SetParm			; save address
 		call	LoadCV
+		; set Position depending on bit D
+		bcf POSITION,0
+		btfsc DCCDATABF2,0 
+		bsf POSITION,0
+		bsf DO_CHANGE_POS
 		bsf	MOVING_STATE		; move to test
-		movf	RANGE1,w
+		movlw d'150'
+		movwf CURRENT_PULSE
+		movf	RANGE,w
 		movwf	SRV1CNT
 		goto	EndProg
 
@@ -1033,13 +1058,23 @@ FlashLED:
 ; ----------------------------------------------------------------------
 
 Decode:
+		movf DCCDATA1,w
+    movwf DCCDATABF1
+    movf DCCDATA2,w
+    movwf DCCDATABF2
+    movf DCCDATA3,w
+    movwf DCCDATABF3
+    movf DCCDATA4,w
+    movwf DCCDATABF4
+		
+		
 		bcf	NEW_PACKET		; prepare for next packet
 		bcf	INTCON,INTE		; disable interrupts for more speed
 
-		movf	DATA1,w			; exclusive or check
-		xorwf	DATA2,w
-		xorwf	DATA3,w
-		xorwf	DATA4,w
+		movf	DCCDATABF1,w			; exclusive or check
+		xorwf	DCCDATABF2,w
+		xorwf	DCCDATABF3,w
+		xorwf	DCCDATABF4,w
 
 		btfss	STATUS,Z		; valid packet?
 		goto	ExitDecode		; no, return
@@ -1047,10 +1082,9 @@ Decode:
 ; 'AAAAAAAA''DDDDDDDD''EEEEEEEE'		; 3 byte packet
 ;   DATA1     DATA2     DATA3
 
-		movf	DATA1,w			; address = '00000000' ?
+		movf	DCCDATABF1,w			; address = '00000000' ?
 		btfsc	STATUS,Z
 		goto	Broadcast
-;		movf	DATA1,w
 		andlw	0xC0
 		xorlw	0x80			;'10xxxxxx'? accessory operation
 		btfss	STATUS,Z
@@ -1059,20 +1093,19 @@ Decode:
 
 Accessory:
 		bcf	RESET_FLG
-;		btfsc	KEY_PROG		; pressed switch?
-;		goto	AccessProg		; yes, program new address
 
 AccSrv1:
 		movf	SRVADRH1,w		; '10AAAAAA' of servo 1
-		xorwf	DATA1,w
+		xorwf	DCCDATABF1,w
 		btfss	STATUS,Z
 		goto	AccSrv2
 		movf	SRVADRL1,w		; '1AAACDDD'
-		xorwf	DATA2,w
+		xorwf	DCCDATABF2,w
 		btfss	STATUS,Z
 		goto	AccSrv1B
 		btfss	POSITION,0		; move servo
 		bsf		MOVING_STATE
+		bsf 	DO_CHANGE_POS
 		goto	AccSrv1C
 AccSrv1B:
 		xorlw	0x01			; other position?
@@ -1080,8 +1113,9 @@ AccSrv1B:
 		goto	AccSrv2
 		btfsc	POSITION,0		; move servo
 		bsf		MOVING_STATE
+		bsf 	DO_CHANGE_POS
 AccSrv1C:
-		movf	SPEED1,w		; set speed
+		movf	SPEED,w		; set speed
 		movwf	SRV1CNT
 
 AccSrv2:
@@ -1097,10 +1131,9 @@ ExitFunction:
 ; -----------------------------------------------------------------------
 
 Broadcast:
-		movf	DATA2,w			; reset packet?
+		movf	DCCDATABF2,w			; reset packet?
 		btfss	STATUS,Z
 		goto	ExitDecode
-;		bcf	PROG_2X
 		bsf	RESET_FLG
 
 Clear:						; reset decoder
@@ -1118,8 +1151,6 @@ ExitDecode:
 
 
 ;---------------------------------------------------------------------------
-
-
 LoadCV:
 		movlw	SRVADRH1		; first CV to read
 		movwf	FSR
@@ -1129,7 +1160,7 @@ LoadCVNxt:
 		movf	EEADR0,w
 		call	EE_Read
 		movwf	INDF
-		movlw	SPEED1			; last CV to read
+		movlw	SPEED			; last CV to read
 		xorwf	FSR,w
 		btfsc	STATUS,Z
 		goto	LoadCVEnd
@@ -1142,29 +1173,40 @@ LoadCVEnd:
 
 
 ;---------------------------------------------------------------------------
-
 LoadOutputs:
+		bsf DO_CHANGE_POS
 		movlw	EE_OUT			; read saved outputs
 		call	EE_Read
-		movwf	POSITION			
-
-		movf	RANGE1,w		; calculate pulse for position
+		movwf	POSITION	
+		movf	RANGE,w		; calculate pulse for position
 		btfsc	POSITION,0		; ***************
 		xorlw	0xFF
 		btfsc	POSITION,0		; ***************
 		addlw	0x01
 		addlw	d'150'
-		movwf	PULSE1
-
+		movwf	CURRENT_PULSE
 		movlw	0x10			; pulses for setting position
 		movwf	SRV1CNT
 		bsf	REACHED_STATE		; do move to reached position
 		bsf	MOVING_STATE
 		return
 
+SetServoPositionNoChange:
+		bcf DO_CHANGE_POS
+		movf	RANGE,w		; calculate pulse for position
+		btfss	POSITION,0		; ***************
+		xorlw	0xFF
+		btfss	POSITION,0		; ***************
+		addlw	0x01
+		addlw	d'150'
+		movwf	CURRENT_PULSE
+		movlw	0x10			; pulses for setting position
+		movwf	SRV1CNT
+		bsf	REACHED_STATE		; do move to reached position
+		bsf	MOVING_STATE
+		return		
 
 ;----- Internal EEPROM routines ------------------------------------------------
-
 
 EE_Read:
 		bsf	STATUS,RP0		; w=ADR
