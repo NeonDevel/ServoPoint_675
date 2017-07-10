@@ -10,7 +10,7 @@
 ;; Date:            26.10.2007						;;
 ;; First release:   26.10.2007						;;
 ;; Last release by Paco  26.10.2007
-;; LastDate:        03.07.2017						;; 
+;; LastDate:        11.07.2017						;; 
 ;;									
 ;;======================================================================;;
 ;
@@ -35,8 +35,8 @@
 ; 											- Speed settings limit from 1 fastest to 4 slowest, default 1
 ; 											- Range from 0 to 50, default 25
 ; 26.06.2017 ver 2.1.2	- fixed flash prescaller, 10ms PPM period
-; 03.07.2017 ver 2.1.4	- production version (speed range 1-4), positive angle range 2-50 with step 2 [0.1ms]  
-; 											
+; 03.07.2017 ver 2.1.4	- (speed range (1..4), positive angle range (2..50) [0.1ms] with step 2   
+; 11.07.2017 ver 2.1.5	- servo angle configuration in range (-50..+50)*[0.1ms] with step 1 								
 ; 											
 ;----------------------------------------
 ; configuration guide
@@ -65,7 +65,7 @@
 ;---------------------------------------- 
 ; ----- Definitions
 
-#define		__VERDAY		0x03
+#define		__VERDAY		0x11
 #define		__VERMONTH	0x07
 #define		__VERYEAR		0x17
 #define		__VERNUM		D'1'
@@ -109,9 +109,9 @@ OPTION_INI	equ	0x88			; Option register: no pull-up, falling GP2, no prescaler, 
 INTC_INI		equ	0xD0			; GIE(bit7), PEIE enable(bit6),INTE enable(bit4), 
 
 RANGE_MAX   	equ d'50'
-RANGE_DEFAULT	equ d'2'
-RANGE_MIN			equ d'2'
-RANGE_STEP		equ d'2'
+RANGE_DEFAULT	equ d'0'
+RANGE_MIN			equ 0xCE  ;-50
+RANGE_STEP		equ d'1'
 ; pulse width = (150 +-Range) * 10 *1us = 1.5ms +-0.5ms =  (1ms .. 2ms)
 SPEED_MAX 		equ d'1'
 SPEED_DEFAULT	equ d'1'
@@ -518,7 +518,7 @@ DoServoJump:
 ; ----------------------------------------------------------------------
 
 PulseServo1:
-		clrf	SPACE_H			; init spacing value (20ms)
+		clrf	SPACE_H			; init spacing value (10ms)
 		clrf	SPACE_L
 
 		movf	CURRENT_PULSE,w		; 200: 2ms, 100: 1ms
@@ -559,15 +559,14 @@ Spacing:
 		movf	SPACE_L,w
 		movwf	TMR1L
 	
-	; 20ms time ( 0x10000 - 0x4E20 = 0xB1E0 )
-	; 10ms  ( 0x10000 - 0x2710 = 0xD8F0 )
-		movlw	0xF0  ;0xE0			
+	; old 20ms time ( 0x10000 - 0x4E20 = 0xB1E0 )
+	; new 10ms  ( 0x10000 - 0x2710 = 0xD8F0 )
+		movlw	0xF0 			
 		addwf	TMR1L,f
 		btfsc	STATUS,C
 		incf	TMR1H,f
-		movlw	0xD8	;0xB1
+		movlw	0xD8
 		addwf	TMR1H,f		
-;		bcf	PIR1,TMR1IF
 		bsf	T1CON,TMR1ON		; run timer 1
 		clrf	SERVOSTATE
 		bsf END_PULSE
@@ -618,41 +617,59 @@ PulseServo:
 ; ----------------------------------------------------------------------
 
 
-EndSpacing:					; every 20ms
+EndSpacing:					; every 10ms
 		return
 		
+
+;handling bidirectional range configuration (-50,50) - EndServo1 replacement
 EndServo1:
 		btfss	MOVING_STATE		; moving servo?
 		return				; no
-		
-EndServo1a:		
-		btfss	POSITION,0		; yes	*************
-		goto	EndServo1Nxt
-EndServo1b:		
-		btfsc	REACHED_STATE
-		goto	EndServo1WW1
-
-		decfsz	SRV1CNT,f		; speed
-		goto	EndServo1W1
-		movf	SPEED,w
-		movwf	SRV1CNT
-		decf	CURRENT_PULSE,f
-EndServo1W1:
+		btfss	POSITION,0	
+		goto EndServo1a		
 		comf	RANGE,w		; range (negative)
 		addlw	0x01
 		addlw	d'150'
-		xorwf	CURRENT_PULSE,w
+		movwf TARGET_PULSE
+		goto EndServo1x
+EndServo1a:
+		movf	RANGE,w
+		addlw	d'150'		
+		movwf TARGET_PULSE
+EndServo1x:	
+		btfsc	REACHED_STATE
+		goto	EndServo1Reached  
+		decfsz	SRV1CNT,f		; speed
+		goto	EndServo1Cmp
+		movf	SPEED,w
+		movwf	SRV1CNT
+    ; change CURRENT_PULSE
+		movf  CURRENT_PULSE,w  
+		subwf TARGET_PULSE,w  ;f-W -> W ; C=0 for negative; C=1 for positive and Zero
+		btfsc STATUS,Z
+		goto EndServo1Equ
+		btfsc STATUS,C
+		incf CURRENT_PULSE,f  ; current>target
+		btfss STATUS,C
+		decf CURRENT_PULSE,f		
+EndServo1Cmp:
+		movf  CURRENT_PULSE,w 
+		xorwf	TARGET_PULSE,w
 		btfss	STATUS,Z
 		return
+EndServo1Equ:		
 		movlw	REACH_PULS
 		movwf	SRV1CNT
 		bsf	REACHED_STATE
 		return
-EndServo1WW1:
+EndServo1Reached:		
 		decfsz	SRV1CNT,f		; additional pulses
 		return
+		movlw 0x01
 		btfsc DO_CHANGE_POS
-		bcf	POSITION,0		; **********************
+		xorwf	POSITION,f		; save new output state
+		goto EndServoSave
+		
 EndServoSave:
 		bcf DO_CHANGE_POS
 		bcf	REACHED_STATE
@@ -672,33 +689,9 @@ EndServoSave:
 		movlw	EE_OUT
 		goto	SetParm
 
-EndServo1Nxt:
-		btfsc	REACHED_STATE
-		goto	EndServo1WW2
 
-		decfsz	SRV1CNT,f		; speed
-		goto	EndServo1W2
-		movf	SPEED,w
-		movwf	SRV1CNT
-		incf	CURRENT_PULSE,f
-EndServo1W2:
-		movlw	d'150'			; range
-		addwf	RANGE,w
-		xorwf	CURRENT_PULSE,w
-		btfss	STATUS,Z
-		return
-		movlw	REACH_PULS
-		movwf	SRV1CNT
-		bsf	REACHED_STATE
-		return
-EndServo1WW2:
-		decfsz	SRV1CNT,f
-		return
-		btfsc DO_CHANGE_POS
-		bsf	POSITION,0		; *****************
-		goto	EndServoSave
 
-CheckKey:				; every 20ms
+CheckKey:				; every 10ms
 		btfsc	SWITCH			; check program switch 
 		goto	ReadInputSwitch
 		decf	DEBOUNCE_PROG_CNT,f		; *** for 2,5s
@@ -776,7 +769,7 @@ ProgLoop:
 		btfsc	STATUS,C
 		bsf	LED
 ProgADC:    
-    ; Adc keyboard  - every 20ms
+    ; Adc keyboard  - every 10ms
     btfss DO_ADC
     goto ProgKey
     bcf DO_ADC
@@ -978,7 +971,7 @@ ProgAKeyRange:
     subwf RANGE,w
     btfsc STATUS,Z 
     goto ProgAKeyRangeEnd  
-    movlw RANGE_STEP     ;+5
+    movlw RANGE_STEP     ;
     addwf RANGE,w
     goto ProgAKeySetRangeValue
 ProgAKeyRangeDown:   
@@ -1174,7 +1167,6 @@ LoadCVEnd:
 
 ;---------------------------------------------------------------------------
 LoadOutputs:
-		bsf DO_CHANGE_POS
 		movlw	EE_OUT			; read saved outputs
 		call	EE_Read
 		movwf	POSITION	
@@ -1185,9 +1177,10 @@ LoadOutputs:
 		addlw	0x01
 		addlw	d'150'
 		movwf	CURRENT_PULSE
-		movlw	0x10			; pulses for setting position
+		movlw	0x20			; pulses for setting position
 		movwf	SRV1CNT
 		bsf	REACHED_STATE		; do move to reached position
+		bsf DO_CHANGE_POS
 		bsf	MOVING_STATE
 		return
 
@@ -1200,10 +1193,11 @@ SetServoPositionNoChange:
 		addlw	0x01
 		addlw	d'150'
 		movwf	CURRENT_PULSE
-		movlw	0x10			; pulses for setting position
+		movlw	0x20			; pulses for setting position
 		movwf	SRV1CNT
 		bsf	REACHED_STATE		; do move to reached position
 		bsf	MOVING_STATE
+		bcf DO_CHANGE_POS
 		return		
 
 ;----- Internal EEPROM routines ------------------------------------------------
